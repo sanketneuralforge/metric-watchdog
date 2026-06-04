@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+.env
+db/
+*.db
+test_dashboard.png
+test_text_pipeline.py
