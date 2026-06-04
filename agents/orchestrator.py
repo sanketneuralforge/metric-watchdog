@@ -5,7 +5,8 @@ from datetime import datetime
 from core.models import RunResult
 from core.schema import SchemaContext, discover_from_postgres
 from core import db
-from agents import reader_agent, reasoning_agent, diagnosis_agent
+from agents import reader_agent, reasoning_agent, diagnosis_agent, narrator_agent
+from delivery import email_sender, slack_sender
 from config.settings import settings
 
 
@@ -13,12 +14,6 @@ def run_pipeline(
     image_path: str,
     schema: SchemaContext | None = None,
 ) -> RunResult:
-    """
-    Main pipeline entry point.
-
-    schema: if None, auto-discovers from Postgres connection.
-            Pass explicitly to use a custom schema.
-    """
     run_id = f"watchdog_{datetime.now().strftime('%Y%m%d_%H%M')}"
     print(f"\n{'='*50}")
     print(f"  METRIC WATCHDOG — Run {run_id}")
@@ -26,17 +21,16 @@ def run_pipeline(
 
     start = time.time()
 
-    # Load schema — auto-discover if not provided
+    # Load schema
     if schema is None:
         print("  [schema] Auto-discovering from Postgres...")
         schema = discover_from_postgres(settings.postgres_url)
         print(f"  [schema] Found {len(schema.tables)} tables: "
               f"{schema.table_names()}")
 
-    # Register allowed tables with DB layer
     db.set_allowed_tables(schema.table_names())
 
-    # Step 1 — Read dashboard
+    # Step 1 — Read
     reading = reader_agent.run(image_path)
 
     # Step 2 — Reason
@@ -48,19 +42,44 @@ def run_pipeline(
         bundles = diagnosis_agent.run(reasoning, schema)
     else:
         print("  [diagnosis] All normal — skipping Postgres queries")
+        bundles = []
+
+    # Step 4 — Narrate
+    briefing = narrator_agent.run(reading, reasoning, bundles)
+
+    # Step 5 — Deliver
+    print(f"\n  [delivery] Severity: {briefing.overall_severity}")
+    print(f"\n{briefing.briefing_text}")
+
+    # Save HTML briefing to disk
+    html_path = f"db/briefing_{run_id}.html"
+    import os
+    os.makedirs("db", exist_ok=True)
+    with open(html_path, "w") as f:
+        f.write(briefing.briefing_html)
+    print(f"  [delivery] HTML saved: {html_path}")
+
+    # Email
+    email_sender.send_briefing(
+        briefing_text=briefing.briefing_text,
+        briefing_html=briefing.briefing_html,
+        subject=f"Metric Watchdog — {briefing.overall_severity} — "
+                f"{datetime.now().strftime('%d %b %Y')}",
+    )
+
+    # Slack
+    slack_sender.send_briefing(
+        briefing_text=briefing.briefing_text,
+        severity=briefing.overall_severity,
+    )
 
     duration = time.time() - start
 
     print(f"\n{'='*50}")
     print(f"  PIPELINE COMPLETE")
-    print(f"  Severity:    {reasoning.overall_severity}")
-    print(f"  Concerning:  {reasoning.concerning_metrics}")
-    print(f"  Narrative:   {reasoning.narrative}")
-    for b in bundles:
-        print(f"  {b.metric_name}: "
-              f"{len(b.proven)} proven, "
-              f"{len(b.unresolvable)} unresolvable")
+    print(f"  Severity:    {briefing.overall_severity}")
     print(f"  Duration:    {duration:.1f}s")
+    print(f"  HTML:        {html_path}")
     print(f"{'='*50}\n")
 
     return RunResult(
@@ -69,8 +88,7 @@ def run_pipeline(
         dashboard_reading=reading,
         reasoning=reasoning,
         evidence_bundles=bundles,
-        briefing_text="",
-        briefing_html="",
+        briefing=briefing,
         duration_seconds=duration,
-        status="partial",
+        status="success",
     )
