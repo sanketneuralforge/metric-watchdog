@@ -13,3 +13,4 @@ db/
 *.db
 test_dashboard.png
 test_text_pipeline.py
+logs/
