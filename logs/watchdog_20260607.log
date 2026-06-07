@@ -1,0 +1,13 @@
+2026-06-07 07:39:44 | watchdog.watchdog_test_20260607_073944 | INFO | ============================================================
+2026-06-07 07:39:44 | watchdog.watchdog_test_20260607_073944 | INFO | PIPELINE START — watchdog_test_20260607_073944
+2026-06-07 07:39:44 | watchdog.watchdog_test_20260607_073944 | INFO | Dashboard: test_text_pipeline
+2026-06-07 07:39:44 | watchdog.watchdog_test_20260607_073944 | INFO | ============================================================
+2026-06-07 07:43:27 | watchdog.watchdog_test_20260607_074327 | INFO | ============================================================
+2026-06-07 07:43:27 | watchdog.watchdog_test_20260607_074327 | INFO | PIPELINE START — watchdog_test_20260607_074327
+2026-06-07 07:43:27 | watchdog.watchdog_test_20260607_074327 | INFO | Dashboard: test_text_pipeline
+2026-06-07 07:43:27 | watchdog.watchdog_test_20260607_074327 | INFO | ============================================================
+2026-06-07 07:43:54 | watchdog.watchdog_test_20260607_074327 | INFO | [narrator] ── START ──────────────────────
+2026-06-07 07:43:54 | watchdog.watchdog_test_20260607_074327 | INFO | [narrator] Writing briefing for 3 metrics
+2026-06-07 07:44:02 | watchdog.watchdog_test_20260607_074327 | INFO | [narrator] Severity: CRITICAL
+2026-06-07 07:44:02 | watchdog.watchdog_test_20260607_074327 | INFO | [narrator] Sections: 3
+2026-06-07 07:44:02 | watchdog.watchdog_test_20260607_074327 | INFO | [narrator] ── END [SUCCESS] 7415ms ──

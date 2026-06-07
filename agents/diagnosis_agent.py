@@ -107,6 +107,7 @@ Return ONLY valid JSON — no markdown, no preamble:
 def run(
     reasoning: ReasoningOutput,
     schema: "SchemaContext",
+    log: "RunLog | None" = None,
 ) -> list[EvidenceBundle]:
     """
     For each concerning metric, investigate its gaps via Postgres.
@@ -152,7 +153,7 @@ def run(
     for metric_name in reasoning.concerning_metrics:
         gaps = gaps_by_metric.get(metric_name, [])
         print(f"  [diagnosis] {metric_name}: {len(gaps)} gap(s)")
-        bundle = _investigate_metric(metric_name, gaps, reasoning, schema)
+        bundle = _investigate_metric(metric_name, gaps, reasoning, schema, log=log)
         bundles.append(bundle)
 
     print(f"  [diagnosis] Built {len(bundles)} evidence bundles")
@@ -208,6 +209,7 @@ def _investigate_metric(
     gaps: list[InvestigationGap],
     reasoning: ReasoningOutput,
     schema: "SchemaContext",
+    log: "RunLog | None" = None,
 ) -> EvidenceBundle:
     """Investigate one metric — run SQL for each of its gaps."""
     bundle = EvidenceBundle(
@@ -219,7 +221,7 @@ def _investigate_metric(
         return bundle
 
     for gap in gaps:
-        result = _investigate_gap(gap, schema)
+        result = _investigate_gap(gap, schema, log=log)
         if result.resolved and result.evidence:
             bundle.proven.append(result.evidence)
         else:
@@ -231,6 +233,7 @@ def _investigate_metric(
 def _investigate_gap(
     gap: InvestigationGap,
     schema: "SchemaContext",
+    log: "RunLog | None" = None,
 ) -> DiagnosisResult:
     """
     Write SQL for a gap, execute it safely, build Evidence.

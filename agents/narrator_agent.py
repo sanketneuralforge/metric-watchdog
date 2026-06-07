@@ -97,14 +97,17 @@ def run(
     reading: DashboardReading,
     reasoning: ReasoningOutput,
     bundles: list[EvidenceBundle],
+    log: RunLog | None = None,
 ) -> BriefingDocument:
-    """
-    Write the sourced briefing from evidence bundles.
-    Returns a BriefingDocument with text and HTML versions.
-    """
+    import time
+    start = time.time()
+
+    if log:
+        log.stage_start("narrator")
+        log.info("narrator", f"Writing briefing for {len(bundles)} metrics")
+
     print(f"  [narrator] Writing briefing for {len(bundles)} metrics...")
 
-    # Format evidence for the prompt
     evidence_text = _format_evidence_for_prompt(bundles)
     reasoning_text = _format_reasoning_for_prompt(reasoning)
     reading_text = _format_reading_for_prompt(reading)
@@ -129,11 +132,19 @@ Write the sourced briefing now.
         )
         data = parse_json_response(raw)
     except Exception as e:
-        print(f"  [narrator] Failed: {e}")
+        if log:
+            log.error("narrator", f"LLM failed: {e}")
         data = _fallback_briefing(reasoning, bundles)
 
-    # Build BriefingDocument
     briefing = _build_briefing_document(data, reading, reasoning, bundles)
+
+    duration_ms = int((time.time() - start) * 1000)
+
+    if log:
+        log.info("narrator", f"Severity: {briefing.overall_severity}")
+        log.info("narrator", f"Sections: {len(briefing.sections)}")
+        log.stage_end("narrator", duration_ms)
+
     print(f"  [narrator] Briefing complete — "
           f"{len(briefing.sections)} sections, "
           f"severity: {briefing.overall_severity}")

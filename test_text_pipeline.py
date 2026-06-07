@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-
+from core.run_logger import RunLog
+from datetime import datetime
 # test_text_pipeline.py — first 5 lines must be:
 
 import sys
@@ -153,12 +154,19 @@ schema = discover_from_postgres(settings.postgres_url)
 db.set_allowed_tables(schema.table_names())
 print(f"  [schema] {len(schema.tables)} tables found")
 
+# Create run log
+run_id = f"watchdog_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+log = RunLog(run_id)
+log.pipeline_start("test_text_pipeline")
+
 print("\n  [diagnosis] Running SQL investigation...")
-bundles = diagnosis_agent.run(reasoning, schema)
+bundles = diagnosis_agent.run(reasoning, schema, log=log)
+
+
 
 # ── Step 4: Narrate ────────────────────────────────────────────
 print("\n  [narrator] Writing sourced briefing...")
-briefing = narrator_agent.run(reading, reasoning, bundles)
+briefing = narrator_agent.run(reading, reasoning, bundles, log=log)
 
 # ── Print full briefing ────────────────────────────────────────
 print("\n" + "="*50)
