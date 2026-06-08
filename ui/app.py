@@ -170,10 +170,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "▶ Run",
     "📋 History",
     "📄 Logs",
+    "📡 Observability",
 ])
 
 
@@ -424,3 +425,139 @@ with tab3:
             file_name=selected_log,
             mime="text/plain",
         )
+
+# ════════════════════════════════════════════════════════════════
+# TAB 4 — OBSERVABILITY
+# ════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("Observability")
+    st.caption("Production metrics, span traces, and alert rules.")
+
+    from observability.metrics import get_production_metrics
+    from observability.alerts import evaluate_alert_rules
+    from observability.tracer import get_recent_traces, get_spans_for_run
+
+    days = st.selectbox("Time window", [1, 7, 14, 30], index=1)
+    metrics = get_production_metrics(days=days)
+    alerts = evaluate_alert_rules(days=days)
+
+    # ── Active alerts ────────────────────────────────────────────
+    if alerts:
+        st.markdown("**🚨 Active Alerts**")
+        for alert in alerts:
+            icon = "🔴" if alert.level == "critical" else "🟡"
+            st.warning(f"{icon} **{alert.rule}** — {alert.message}")
+        st.markdown("---")
+    else:
+        st.success("✅ No active alerts")
+        st.markdown("---")
+
+    # ── Key metrics ──────────────────────────────────────────────
+    st.markdown("**Key Metrics**")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric(
+        "Total Runs",
+        metrics["total_runs"],
+    )
+    col2.metric(
+        "Completion Rate",
+        f"{metrics['completion_rate_pct']:.0f}%",
+    )
+    col3.metric(
+        "Avg Tokens/Run",
+        f"{metrics['avg_tokens_per_run']:,}",
+    )
+    col4.metric(
+        "Total Cost",
+        f"${metrics['total_cost_usd']:.4f}",
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Proven Claims", metrics["total_proven_claims"])
+    col2.metric("Unresolved Gaps", metrics["total_unresolved_gaps"])
+    col3.metric(
+        "Avg Latency",
+        f"{metrics['avg_latency_ms'] / 1000:.1f}s",
+    )
+    sev = metrics.get("severity_distribution", {})
+    col4.metric(
+        "Critical Runs",
+        sev.get("CRITICAL", 0),
+    )
+
+    st.markdown("---")
+
+    # ── Stage latency breakdown ──────────────────────────────────
+    if metrics["stage_latency"]:
+        st.markdown("**Stage Latency**")
+        for row in metrics["stage_latency"]:
+            st.markdown(
+                f"`{row['stage']:<20}` "
+                f"avg: **{row['avg_ms']/1000:.1f}s** | "
+                f"max: {row['max_ms']/1000:.1f}s | "
+                f"calls: {row['calls']}"
+            )
+        st.markdown("---")
+
+    # ── Stage errors ─────────────────────────────────────────────
+    if metrics["stage_errors"]:
+        st.markdown("**Stage Errors**")
+        for row in metrics["stage_errors"]:
+            st.error(
+                f"**{row['stage']}**: {row['errors']} error(s) "
+                f"in last {days} days"
+            )
+        st.markdown("---")
+
+    # ── Recent run traces ────────────────────────────────────────
+    st.markdown("**Recent Run Traces**")
+    traces = get_recent_traces(limit=10)
+
+    if not traces:
+        st.info("No traces yet. Run the pipeline to generate traces.")
+    else:
+        for trace in traces:
+            severity = trace.get("severity", "UNKNOWN")
+            sev_icon = (
+                "🔴" if severity == "CRITICAL"
+                else "🟡" if severity == "WARNING"
+                else "🟢"
+            )
+            error_flag = (
+                f" ⚠ {trace['error_spans']} errors"
+                if trace.get("error_spans", 0) > 0 else ""
+            )
+
+            with st.expander(
+                f"{sev_icon} {trace['run_id']} — "
+                f"{trace['total_spans']} spans — "
+                f"{trace['total_tokens']:,} tokens — "
+                f"${trace['estimated_cost']:.4f}"
+                f"{error_flag}",
+                expanded=False,
+            ):
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Spans", trace["total_spans"])
+                col2.metric("Tokens", f"{trace['total_tokens']:,}")
+                col3.metric("Cost", f"${trace['estimated_cost']:.4f}")
+
+                # Show individual spans
+                spans = get_spans_for_run(trace["run_id"])
+                if spans:
+                    st.markdown("**Spans:**")
+                    for span in spans:
+                        status_icon = (
+                            "✅" if span["status"] == "success"
+                            else "❌"
+                        )
+                        tokens = (
+                            span["input_tokens"] + span["output_tokens"]
+                        )
+                        st.markdown(
+                            f"{status_icon} `{span['stage']:<20}` "
+                            f"**{span['latency_ms']}ms** | "
+                            f"{tokens} tokens | "
+                            f"model: `{span['model'] or 'n/a'}`"
+                        )
+                        if span.get("error"):
+                            st.error(f"Error: {span['error']}")

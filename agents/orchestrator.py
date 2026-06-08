@@ -4,6 +4,8 @@ import os
 import time
 from datetime import datetime
 
+from observability.tracer import RunTracer
+
 from core.models import RunResult, DashboardReading, ReasoningOutput
 from core.schema import SchemaContext, discover_from_postgres
 from core.run_logger import RunLog
@@ -63,6 +65,8 @@ def run_pipeline(
     log.pipeline_start(image_path)
     start = time.time()
 
+    tracer = RunTracer(run_id)
+
     # ── Pre-flight health check ──────────────────────────────────
     health_warnings = check_pipeline_health(settings)
     for w in health_warnings:
@@ -102,6 +106,13 @@ def run_pipeline(
     db.set_allowed_tables(schema.table_names())
 
     # ── Step 1: Read dashboard ───────────────────────────────────
+    span = tracer.start_span("reader", model=settings.vision_provider)
+    try:
+        reading = reader_agent.run(image_path, log=log)
+        span.estimate_tokens(image_path, str(reading.metrics))
+        tracer.finish_span(span, status="success")
+    except Exception as e:
+        tracer.finish_span(span, status="error", error=str(e))
     try:
         reading = reader_agent.run(image_path, log=log)
     except Exception as e:
@@ -120,6 +131,13 @@ def run_pipeline(
         return _failed_result(run_id, image_path, briefing, time.time() - start)
 
     # ── Step 2: Reason ───────────────────────────────────────────
+    span = tracer.start_span("reasoning", model=settings.llm_provider)
+    try:
+        reasoning = reasoning_agent.run(reading, log=log)
+        span.estimate_tokens(str(reading.metrics), reasoning.narrative)
+        tracer.finish_span(span, status="success")
+    except Exception as e:
+        tracer.finish_span(span, status="error", error=str(e))
     try:
         reasoning = reasoning_agent.run(reading, log=log)
     except Exception as e:
@@ -140,6 +158,16 @@ def run_pipeline(
         return _failed_result(run_id, image_path, briefing, time.time() - start)
 
     # ── Step 3: Diagnose ─────────────────────────────────────────
+    span = tracer.start_span("diagnosis", model=settings.llm_provider)
+    try:
+        bundles = diagnosis_agent.run(reasoning, schema, log=log)
+        span.estimate_tokens(
+            schema.to_prompt_block(),
+            str(sum(len(b.proven) for b in bundles))
+        )
+        tracer.finish_span(span, status="success")
+    except Exception as e:
+        tracer.finish_span(span, status="error", error=str(e))
     bundles = []
     if reasoning.overall_severity in ("CRITICAL", "WARNING"):
         try:
@@ -152,6 +180,14 @@ def run_pipeline(
         log.info("diagnosis", "All normal — skipping Postgres queries")
 
     # ── Step 4: Narrate ──────────────────────────────────────────
+    span = tracer.start_span("narrator", model=settings.llm_provider)
+    try:
+        briefing = narrator_agent.run(reading, reasoning, bundles, log=log)
+        span.estimate_tokens(str(bundles), briefing.briefing_text)
+        tracer.finish_span(span, status="success")
+    except Exception as e:
+        tracer.finish_span(span, status="error", error=str(e))
+        briefing = partial_briefing_from_reading(reading, reasoning, str(e))
     try:
         briefing = narrator_agent.run(reading, reasoning, bundles, log=log)
     except Exception as e:
@@ -240,6 +276,23 @@ def run_pipeline(
     print(f"  Log:         logs/watchdog_{datetime.now().strftime('%Y%m%d')}.log")
     print(f"  HTML:        {html_path}")
     print(f"{'='*50}\n")
+
+    from core.token_budget import TokenUsage, estimate_tokens
+    cost = estimate_tokens(briefing.briefing_text) / 1_000_000 * 0.59
+
+    tracer.save_run_metrics(
+        severity=briefing.overall_severity,
+        metrics_read=len(reading.metrics),
+        proven_claims=sum(len(b.proven) for b in bundles),
+        unresolved_gaps=sum(len(b.unresolvable) for b in bundles),
+        estimated_cost=cost,
+        status="success",
+    )
+
+    summary = tracer.get_summary()
+    log.info("tracer", f"Spans: {summary['total_spans']} | "
+                    f"Tokens: {summary['total_tokens']:,} | "
+                    f"Errors: {summary['error_spans']}")
 
     return result
 

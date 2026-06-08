@@ -168,6 +168,34 @@ bundles = diagnosis_agent.run(reasoning, schema, log=log)
 print("\n  [narrator] Writing sourced briefing...")
 briefing = narrator_agent.run(reading, reasoning, bundles, log=log)
 
+from observability.tracer import RunTracer
+from datetime import datetime
+
+tracer = RunTracer(run_id)
+
+# Log each stage as a span
+span = tracer.start_span("reasoning", model="groq")
+span.estimate_tokens(str(reading.metrics), reasoning.narrative)
+tracer.finish_span(span, status="success")
+
+span = tracer.start_span("diagnosis", model="groq")
+span.estimate_tokens(schema.to_prompt_block(), str(len(bundles)))
+tracer.finish_span(span, status="success")
+
+span = tracer.start_span("narrator", model="groq")
+span.estimate_tokens(str(bundles), briefing.briefing_text)
+tracer.finish_span(span, status="success")
+
+tracer.save_run_metrics(
+    severity=briefing.overall_severity,
+    metrics_read=len(reading.metrics),
+    proven_claims=sum(len(b.proven) for b in bundles),
+    unresolved_gaps=sum(len(b.unresolvable) for b in bundles),
+    estimated_cost=0.006,
+    status="success",
+)
+print(f"\n  Tracer summary: {tracer.get_summary()}")
+
 # ── Print full briefing ────────────────────────────────────────
 print("\n" + "="*50)
 print("  MORNING BRIEFING")
