@@ -4,7 +4,7 @@ import os
 import time
 from datetime import datetime
 
-from core.models import RunResult
+from core.models import RunResult, DashboardReading, ReasoningOutput
 from core.schema import SchemaContext, discover_from_postgres
 from core.run_logger import RunLog
 from core.history_store import save_run, init_db
@@ -12,6 +12,21 @@ from core import db
 from agents import reader_agent, reasoning_agent, diagnosis_agent, narrator_agent
 from delivery import email_sender, slack_sender
 from config.settings import settings
+from guardrails.input_guard import (
+    validate_dashboard_image,
+    validate_postgres_url,
+    check_vision_output_for_injection,
+)
+from guardrails.output_guard import (
+    validate_briefing,
+    scan_sql_for_dangerous_patterns,
+)
+from guardrails.degradation import (
+    postgres_unavailable_briefing,
+    vision_failed_briefing,
+    partial_briefing_from_reading,
+    check_pipeline_health,
+)
 
 
 def run_pipeline(
@@ -20,6 +35,7 @@ def run_pipeline(
 ) -> RunResult:
     """
     Full pipeline: Read → Reason → Diagnose → Narrate → Deliver.
+    Guardrails at every stage — degrades gracefully on failure.
     Logs every stage to plain text log file.
     Saves run to history store.
     """
@@ -28,8 +44,21 @@ def run_pipeline(
     # ── Initialize logger ────────────────────────────────────────
     log = RunLog(run_id)
     log.pipeline_start(image_path)
-
     start = time.time()
+
+    # ── Pre-flight health check ──────────────────────────────────
+    health_warnings = check_pipeline_health(settings)
+    for w in health_warnings:
+        log.warning("preflight", w)
+        print(f"  ⚠ {w}")
+
+    # ── Ring 1: Validate image ───────────────────────────────────
+    img_validation = validate_dashboard_image(image_path)
+    if not img_validation.is_valid:
+        log.error("reader", f"Input validation failed: {img_validation.error}")
+        briefing = vision_failed_briefing(img_validation.error)
+        _deliver(briefing, log)
+        return _failed_result(run_id, image_path, briefing, time.time() - start)
 
     # ── Schema ───────────────────────────────────────────────────
     if schema is None:
@@ -41,8 +70,17 @@ def run_pipeline(
                 f"Found {len(schema.tables)} tables: {schema.table_names()}"
             )
         except Exception as e:
-            log.error("schema", f"Discovery failed: {e}")
-            raise
+            log.error("schema", f"Postgres unreachable: {e}")
+            briefing = postgres_unavailable_briefing(str(e))
+            _deliver(briefing, log)
+            return _failed_result(run_id, image_path, briefing, time.time() - start)
+    else:
+        log.info("schema", f"Using provided schema: {schema.table_names()}")
+
+    # Ring 1: Validate Postgres URL
+    pg_validation = validate_postgres_url(settings.postgres_url)
+    if not pg_validation.is_valid:
+        log.error("schema", pg_validation.error)
 
     db.set_allowed_tables(schema.table_names())
 
@@ -51,14 +89,38 @@ def run_pipeline(
         reading = reader_agent.run(image_path, log=log)
     except Exception as e:
         log.error("reader", f"Failed: {e}")
-        raise
+        briefing = vision_failed_briefing(str(e))
+        _deliver(briefing, log)
+        return _failed_result(run_id, image_path, briefing, time.time() - start)
+
+    # Ring 2: Check vision output for injection attempts
+    vision_text = " ".join([m.name + " " + m.value for m in reading.metrics])
+    injection_check = check_vision_output_for_injection(vision_text)
+    if not injection_check.is_valid:
+        log.error("reader", f"Injection detected: {injection_check.error}")
+        briefing = vision_failed_briefing(injection_check.error)
+        _deliver(briefing, log)
+        return _failed_result(run_id, image_path, briefing, time.time() - start)
 
     # ── Step 2: Reason ───────────────────────────────────────────
     try:
         reasoning = reasoning_agent.run(reading, log=log)
     except Exception as e:
         log.error("reasoning", f"Failed: {e}")
-        raise
+        # Degraded — deliver partial briefing from reading alone
+        briefing = partial_briefing_from_reading(
+            reading,
+            ReasoningOutput(
+                concerning_metrics=[],
+                co_moving_pairs=[],
+                narrative="Reasoning failed — manual review required",
+                gaps=[],
+                overall_severity="WARNING",
+            ),
+            str(e),
+        )
+        _deliver(briefing, log)
+        return _failed_result(run_id, image_path, briefing, time.time() - start)
 
     # ── Step 3: Diagnose ─────────────────────────────────────────
     bundles = []
@@ -68,6 +130,7 @@ def run_pipeline(
         except Exception as e:
             log.error("diagnosis", f"Failed: {e}")
             # Don't raise — continue to narrator with empty bundles
+            # partial_briefing will flag all claims as unverified
     else:
         log.info("diagnosis", "All normal — skipping Postgres queries")
 
@@ -76,12 +139,29 @@ def run_pipeline(
         briefing = narrator_agent.run(reading, reasoning, bundles, log=log)
     except Exception as e:
         log.error("narrator", f"Failed: {e}")
-        raise
+        briefing = partial_briefing_from_reading(reading, reasoning, str(e))
+
+    # ── Ring 4: Validate output ──────────────────────────────────
+    output_validation = validate_briefing(
+        briefing,
+        bundles,
+        allowed_tables=db._allowed_tables,
+    )
+    if output_validation.violations:
+        for v in output_validation.violations:
+            log.error("output_guard", f"Violation: {v}")
+    for w in output_validation.warnings:
+        log.warning("output_guard", f"Warning: {w}")
+
+    if not output_validation.is_valid:
+        log.error("output_guard",
+                  f"{len(output_validation.violations)} violations — "
+                  f"briefing may be incomplete")
 
     # ── Step 5: Deliver ──────────────────────────────────────────
-    log.stage_start("delivery")
+    _deliver(briefing, log)
 
-    # Save HTML briefing to disk
+    # Save HTML briefing
     os.makedirs("db", exist_ok=True)
     html_path = f"db/briefing_{run_id}.html"
     try:
@@ -91,32 +171,7 @@ def run_pipeline(
     except Exception as e:
         log.error("delivery", f"HTML save failed: {e}")
 
-    # Email
-    try:
-        email_ok = email_sender.send_briefing(
-            briefing_text=briefing.briefing_text,
-            briefing_html=briefing.briefing_html,
-            subject=(
-                f"Metric Watchdog — {briefing.overall_severity} — "
-                f"{datetime.now().strftime('%d %b %Y')}"
-            ),
-        )
-        log.info("delivery", f"Email: {'sent' if email_ok else 'disabled/failed'}")
-    except Exception as e:
-        log.error("delivery", f"Email error: {e}")
-
-    # Slack
-    try:
-        slack_ok = slack_sender.send_briefing(
-            briefing_text=briefing.briefing_text,
-            severity=briefing.overall_severity,
-        )
-        log.info("delivery", f"Slack: {'sent' if slack_ok else 'disabled/failed'}")
-    except Exception as e:
-        log.error("delivery", f"Slack error: {e}")
-
     duration = time.time() - start
-    log.stage_end("delivery", int(duration * 1000))
 
     # ── Build result ─────────────────────────────────────────────
     result = RunResult(
@@ -140,7 +195,6 @@ def run_pipeline(
 
     log.pipeline_end(briefing.overall_severity, duration)
 
-    # ── Print summary ────────────────────────────────────────────
     print(f"\n{'='*50}")
     print(f"  PIPELINE COMPLETE")
     print(f"  Run ID:      {run_id}")
@@ -154,3 +208,61 @@ def run_pipeline(
     print(f"{'='*50}\n")
 
     return result
+
+
+def _deliver(briefing, log: RunLog):
+    """Send briefing via email and Slack."""
+    log.stage_start("delivery")
+    try:
+        email_ok = email_sender.send_briefing(
+            briefing_text=briefing.briefing_text,
+            briefing_html=briefing.briefing_html,
+            subject=(
+                f"Metric Watchdog — {briefing.overall_severity} — "
+                f"{datetime.now().strftime('%d %b %Y')}"
+            ),
+        )
+        log.info("delivery", f"Email: {'sent' if email_ok else 'disabled/failed'}")
+    except Exception as e:
+        log.error("delivery", f"Email error: {e}")
+
+    try:
+        slack_ok = slack_sender.send_briefing(
+            briefing_text=briefing.briefing_text,
+            severity=briefing.overall_severity,
+        )
+        log.info("delivery", f"Slack: {'sent' if slack_ok else 'disabled/failed'}")
+    except Exception as e:
+        log.error("delivery", f"Slack error: {e}")
+
+
+def _failed_result(
+    run_id: str,
+    image_path: str,
+    briefing,
+    duration: float,
+) -> RunResult:
+    """Build a RunResult for a failed/degraded pipeline run."""
+    return RunResult(
+        run_id=run_id,
+        date=datetime.now().isoformat(),
+        dashboard_reading=DashboardReading(
+            metrics=[],
+            time_period="",
+            dashboard_title="",
+            charts_described=[],
+            reading_notes="Pipeline failed",
+            image_path=image_path,
+        ),
+        reasoning=ReasoningOutput(
+            concerning_metrics=[],
+            co_moving_pairs=[],
+            narrative="",
+            gaps=[],
+            overall_severity="CRITICAL",
+        ),
+        evidence_bundles=[],
+        briefing=briefing,
+        duration_seconds=duration,
+        status="failed",
+    )
