@@ -129,6 +129,7 @@ Write the sourced briefing now.
         raw = call_llm(
             system_prompt=NARRATOR_PROMPT,
             user_message=user_message,
+            stage="narrator",            # → routes to 70b
         )
         data = parse_json_response(raw)
     except Exception as e:

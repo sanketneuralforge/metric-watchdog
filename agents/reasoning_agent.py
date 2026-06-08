@@ -82,6 +82,7 @@ Reason through this dashboard and identify what needs investigation.
     raw = call_llm(
         system_prompt=REASONING_PROMPT,
         user_message=user_message,
+        stage="reasoning",           # → routes to 70b
     )
 
     try:

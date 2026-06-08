@@ -29,6 +29,8 @@ from guardrails.degradation import (
 )
 
 
+
+
 def run_pipeline(
     image_path: str,
     schema: SchemaContext | None = None,
@@ -39,6 +41,21 @@ def run_pipeline(
     Logs every stage to plain text log file.
     Saves run to history store.
     """
+
+    # ── Idempotency check ────────────────────────────────────────
+    from core.idempotency import is_duplicate_run
+    if is_duplicate_run(image_path):
+        log.warning("preflight",
+                    "Duplicate run detected — already ran for this "
+                    "dashboard today. Skipping.")
+        print("  ⚠ Duplicate run detected — skipping.")
+        # Return early without running pipeline
+        from core.history_store import get_recent_runs
+        runs = get_recent_runs(limit=1)
+        if runs:
+            print(f"  Last run: {runs[0]['run_id']} — {runs[0]['severity']}")
+        return None
+
     run_id = f"watchdog_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # ── Initialize logger ────────────────────────────────────────
@@ -184,6 +201,23 @@ def run_pipeline(
         duration_seconds=duration,
         status="success",
     )
+
+    # ── Token usage estimate ─────────────────────────────────────
+    from core.token_budget import TokenUsage, estimate_tokens
+    usage = TokenUsage(run_id=run_id)
+    # Rough estimates from pipeline stages
+    usage.reasoning_input = estimate_tokens(str(reading.metrics))
+    usage.reasoning_output = estimate_tokens(reasoning.narrative)
+    usage.diagnosis_input = estimate_tokens(schema.to_prompt_block()) * len(reasoning.gaps)
+    usage.diagnosis_output = estimate_tokens(str(bundles))
+    usage.narrator_input = estimate_tokens(briefing.briefing_text)
+    usage.narrator_output = estimate_tokens(briefing.briefing_text)
+
+    cost = usage.estimated_cost_usd(settings.llm_provider)
+    log.info("cost", f"Estimated tokens: {usage.total()} | "
+                     f"Estimated cost: ${cost:.4f}")
+    print(f"  Tokens:      ~{usage.total():,}")
+    print(f"  Est. cost:   ${cost:.4f}")
 
     # ── Save to history ──────────────────────────────────────────
     try:

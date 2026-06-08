@@ -11,24 +11,31 @@ import os
 from config.settings import settings
 
 
+# core/llm.py — update call_llm signature
+
 def call_llm(
     system_prompt: str,
     user_message: str,
+    mode: str = "unknown",
+    stage: str = "default",          # ← new
     temperature: float | None = None,
     max_retries: int = 3,
+    max_tokens: int | None = None,
 ) -> str:
-    """Route to the configured LLM provider."""
+    """Route to the configured LLM provider with model routing."""
+    from core.model_router import get_model_for_stage
     temp = temperature if temperature is not None else settings.llm_temperature
-    provider = os.getenv("LLM_PROVIDER", settings.llm_provider)  # read fresh
+    provider = os.getenv("LLM_PROVIDER", settings.llm_provider)
+    model = get_model_for_stage(stage)
 
     for attempt in range(max_retries):
         try:
             if provider == "gemini":
-                return _call_gemini(system_prompt, user_message, temp)
+                return _call_gemini(system_prompt, user_message, temp, model)
             elif provider == "groq":
-                return _call_groq(system_prompt, user_message, temp)
+                return _call_groq(system_prompt, user_message, temp, model, max_tokens)
             elif provider == "anthropic":
-                return _call_anthropic(system_prompt, user_message, temp)
+                return _call_anthropic(system_prompt, user_message, temp, model)
             elif provider == "ollama":
                 return _call_ollama(system_prompt, user_message, temp)
             else:
@@ -61,7 +68,13 @@ def _call_gemini(system_prompt: str, user_message: str, temperature: float) -> s
     return response.text
 
 
-def _call_groq(system_prompt: str, user_message: str, temperature: float) -> str:
+def _call_groq(
+    system_prompt: str,
+    user_message: str,
+    temperature: float,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> str:
     from groq import Groq
     import os
     api_key = os.getenv("GROQ_API_KEY", settings.groq_api_key)
@@ -69,9 +82,9 @@ def _call_groq(system_prompt: str, user_message: str, temperature: float) -> str
         raise ValueError("GROQ_API_KEY not set")
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
-        model=settings.groq_model,
+        model=model or settings.groq_model,
         temperature=temperature,
-        max_tokens=settings.llm_max_tokens,
+        max_tokens=max_tokens or 2048,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},

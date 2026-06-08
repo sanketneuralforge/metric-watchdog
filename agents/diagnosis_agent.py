@@ -192,6 +192,7 @@ Match each gap index to the most semantically similar dashboard metric name.
         raw = call_llm(
             system_prompt=GAP_MATCHING_PROMPT,
             user_message=user_message,
+            stage="gap_matching",        # → routes to 8b (cheaper)
         )
         data = parse_json_response(raw)
         return {
@@ -320,6 +321,7 @@ Focus on last 7-14 days.
         raw = call_llm(
             system_prompt=SQL_WRITER_PROMPT,
             user_message=user_message,
+            stage="sql_writer",          # → routes to 70b
         )
         result = parse_json_response(raw)
         if log:
@@ -357,6 +359,7 @@ State only what the data shows. Be specific about numbers.
         raw = call_llm(
             system_prompt=EVIDENCE_BUILDER_PROMPT,
             user_message=user_message,
+            stage="evidence_builder",    # → routes to 8b (cheaper)
         )
         data = parse_json_response(raw)
         return Evidence(
