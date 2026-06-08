@@ -1,0 +1,15 @@
+# .dockerignore
+.env
+.venv
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+logs/
+db/*.db
+db/*.html
+test_*.py
+test_dashboard.png
+*.md
+docs/

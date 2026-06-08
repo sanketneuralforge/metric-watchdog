@@ -1,0 +1,72 @@
+# docker-compose.yml
+
+version: "3.9"
+
+services:
+
+  # ── Postgres ────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: watchdog
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./data/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI ─────────────────────────────────────────────────────
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-groq}
+      - VISION_PROVIDER=${VISION_PROVIDER:-ollama}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llama3.2-vision}
+      - POSTGRES_URL=postgresql://postgres:postgres@postgres:5432/watchdog
+      - EMAIL_ENABLED=${EMAIL_ENABLED:-false}
+      - SLACK_ENABLED=${SLACK_ENABLED:-false}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - ALERT_RECIPIENTS=${ALERT_RECIPIENTS:-}
+    volumes:
+      - ./db:/app/db
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Streamlit UI ────────────────────────────────────────────────
+  ui:
+    build: .
+    command: uv run streamlit run ui/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-groq}
+      - VISION_PROVIDER=${VISION_PROVIDER:-ollama}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - POSTGRES_URL=postgresql://postgres:postgres@postgres:5432/watchdog
+    volumes:
+      - ./db:/app/db
+      - ./logs:/app/logs
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
