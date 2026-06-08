@@ -235,96 +235,100 @@ def _investigate_gap(
     schema: "SchemaContext",
     log: "RunLog | None" = None,
 ) -> DiagnosisResult:
-    """
-    Write SQL for a gap, execute it safely, build Evidence.
-    Returns DiagnosisResult with resolved=True if successful.
-    """
-    print(f"    [diagnosis] Investigating: {gap.question[:60]}...")
+    import time
+    start = time.time()
 
-    # Step 1 — Write SQL using schema
-    sql_response = _write_sql(gap, schema)
+    print(f"    [diagnosis] Investigating: {gap.question[:60]}...")
+    if log:
+        log.info("diagnosis", f"Investigating: {gap.question}")
+
+    # Write SQL
+    sql_response = _write_sql(gap, schema, log=log)
     if not sql_response:
+        if log:
+            log.error("diagnosis:sql", f"SQL generation failed for: {gap.question[:60]}")
         return DiagnosisResult(
-            gap=gap,
-            resolved=False,
-            sql_executed=None,
-            evidence=None,
-            failure_reason="SQL generation failed",
+            gap=gap, resolved=False, sql_executed=None,
+            evidence=None, failure_reason="SQL generation failed",
             suggested_next_step=gap.suggested_next_step,
         )
 
     sql = sql_response.get("sql", "").strip()
     if not sql:
+        if log:
+            log.error("diagnosis:sql", "LLM returned empty SQL")
         return DiagnosisResult(
-            gap=gap,
-            resolved=False,
-            sql_executed=None,
-            evidence=None,
-            failure_reason="LLM returned empty SQL",
+            gap=gap, resolved=False, sql_executed=None,
+            evidence=None, failure_reason="Empty SQL returned",
             suggested_next_step=gap.suggested_next_step,
         )
 
-    # Step 2 — Execute SQL safely
+    # Log the full SQL before executing
+    if log:
+        log.info("diagnosis:sql", f"Gap: {gap.question[:80]}")
+        log.logger.debug(f"[diagnosis:sql] Full query:\n{sql}")
+
+    # Execute
     results, error = execute_query_safe(sql)
 
     if error:
-        print(f"    [diagnosis] Query failed: {error[:100]}")
+        if log:
+            log.error("diagnosis:sql", f"FAILED: {error}")
+            log.error("diagnosis:sql", f"Query was:\n{sql}")
+        print(f"    [diagnosis] Query failed: {error[:80]}")
         return DiagnosisResult(
-            gap=gap,
-            resolved=False,
-            sql_executed=sql,
-            evidence=None,
-            failure_reason=f"Query failed: {error}",
+            gap=gap, resolved=False, sql_executed=sql,
+            evidence=None, failure_reason=f"Query failed: {error}",
             suggested_next_step=gap.suggested_next_step,
         )
 
     if not results:
+        if log:
+            log.warning("diagnosis:sql", f"Query returned 0 rows — {gap.question[:60]}")
         return DiagnosisResult(
-            gap=gap,
-            resolved=False,
-            sql_executed=sql,
-            evidence=None,
-            failure_reason="Query returned no results — data may not exist for this period",
+            gap=gap, resolved=False, sql_executed=sql,
+            evidence=None, failure_reason="No results returned",
             suggested_next_step=gap.suggested_next_step,
         )
 
-    # Step 3 — Build Evidence from results
-    evidence = _build_evidence(gap, sql, results)
+    if log:
+        log.success("diagnosis:sql", f"{len(results)} rows returned")
 
+    evidence = _build_evidence(gap, sql, results)
     return DiagnosisResult(
-        gap=gap,
-        resolved=True,
-        sql_executed=sql,
-        evidence=evidence,
-        failure_reason=None,
+        gap=gap, resolved=True, sql_executed=sql,
+        evidence=evidence, failure_reason=None,
         suggested_next_step=None,
     )
-
 
 def _write_sql(
     gap: InvestigationGap,
     schema: "SchemaContext",
+    log: "RunLog | None" = None,
 ) -> dict | None:
-    """Ask the LLM to write SQL for a specific gap using the provided schema."""
     user_message = f"""
 Investigation question: {gap.question}
 Metric concerned: {gap.metric_name}
-Query type needed: {gap.suggested_query_type}
-Suggested table: {gap.suggested_table}
+Query type: {gap.suggested_query_type}
 
 {schema.to_prompt_block()}
 
-Write a SQL query using ONLY the tables and columns listed above.
-Focus on the last 7-14 days to capture the anomaly.
+Write SQL using ONLY the tables and columns listed above.
+Focus on last 7-14 days.
 """
     try:
         raw = call_llm(
             system_prompt=SQL_WRITER_PROMPT,
             user_message=user_message,
         )
-        return parse_json_response(raw)
+        result = parse_json_response(raw)
+        if log:
+            log.info("diagnosis:sql", f"SQL written: {result.get('explanation', '')[:80]}")
+        return result
     except Exception as e:
         print(f"    [diagnosis] SQL write failed: {e}")
+        if log:
+            log.error("diagnosis:sql", f"SQL write failed: {e}")
         return None
 
 

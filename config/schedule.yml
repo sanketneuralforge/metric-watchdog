@@ -1,0 +1,8 @@
+# config/schedule.yaml
+# Morning briefing schedule
+
+enabled: true
+hour: 8
+minute: 0
+timezone: UTC
+dashboard_path: dashboard.png

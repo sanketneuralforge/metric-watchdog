@@ -49,12 +49,20 @@ def _validate_query(sql: str):
         if re.search(rf'\b{keyword}\b', sql_upper):
             raise ValueError(f"Write operation not allowed: {keyword}")
 
-    # Check tables against dynamic whitelist if populated
+    # Extract CTE names — these are not real tables
+    cte_names = set(re.findall(
+        r'WITH\s+(\w+)\s+AS\s*\(',
+        sql_upper
+    ))
+
+    # Check tables against whitelist — skip CTEs
     if _allowed_tables:
         tables = re.findall(
             r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)',
             sql_upper
         )
         for table in tables:
+            if table.lower() in cte_names:
+                continue  # skip CTE references
             if table.lower() not in _allowed_tables:
                 raise ValueError(f"Table not in schema: {table}")

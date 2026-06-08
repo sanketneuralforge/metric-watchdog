@@ -138,23 +138,77 @@ def _vision_ollama(image_bytes: bytes, mime_type: str) -> str:
 
 
 def _parse_vision_output(raw: str) -> dict:
+    """
+    Parse vision model output into structured schema.
+    If JSON — parse directly.
+    If markdown — use LLM to convert to JSON.
+    """
+    import json
     cleaned = raw.strip()
+
+    # Strip markdown fences
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
         cleaned = "\n".join(lines[1:-1])
+
+    # Try direct JSON parse first
     start = cleaned.find("{")
     end = cleaned.rfind("}") + 1
-    if start == -1 or end == 0:
-        return {
-            "metrics": [],
-            "reading_notes": f"Parse error — raw: {cleaned[:200]}",
-            "_parse_error": True,
-        }
+    if start != -1 and end > 0:
+        try:
+            return json.loads(cleaned[start:end])
+        except json.JSONDecodeError:
+            pass
+
+    # Vision returned markdown — pass to text LLM to extract JSON
+    return _extract_json_from_markdown(cleaned)
+
+
+def _extract_json_from_markdown(markdown_text: str) -> dict:
+    """
+    Use the text LLM to convert markdown vision output to structured JSON.
+    This is more reliable than regex for any markdown format.
+    """
+    from core.llm import call_llm, parse_json_response
+
+    EXTRACTION_PROMPT = """
+You are converting a dashboard analysis from markdown format to JSON.
+
+Extract all metrics and return ONLY valid JSON — no markdown, no preamble.
+
+Required output format:
+{
+  "metrics": [
+    {
+      "name": "metric name",
+      "value": "exact value as shown",
+      "unit": "$ or % or count or k",
+      "direction": "up | down | flat | unknown",
+      "comparison": "comparison period if mentioned or null",
+      "change_value": "absolute change if shown or null",
+      "change_pct": "percentage change if shown or null",
+      "confidence": "HIGH | MEDIUM | LOW"
+    }
+  ],
+  "time_period": "date range shown",
+  "dashboard_title": "dashboard title if visible",
+  "charts_described": ["brief description of each chart"],
+  "reading_notes": "any notes about the data"
+}
+"""
+
     try:
-        return json.loads(cleaned[start:end])
-    except json.JSONDecodeError as e:
+        raw_output = call_llm(
+            system_prompt=EXTRACTION_PROMPT,
+            user_message=f"Convert this dashboard analysis to JSON:\n\n{markdown_text}",
+        )
+        return parse_json_response(raw_output)
+    except Exception as e:
         return {
             "metrics": [],
-            "reading_notes": f"JSON error: {e}",
+            "time_period": "unknown",
+            "dashboard_title": "",
+            "charts_described": [],
+            "reading_notes": f"Extraction failed: {e}",
             "_parse_error": True,
         }
